@@ -1,0 +1,11 @@
+﻿{
+  "profiles": {
+    "Game": {
+      "commandName": "Executable",
+      "workingDirectory": "C:/Users/12847/Documents/BaiduSyncdisk/SplineTrails",
+      "executablePath": "C:/Program Files (x86)/Flax/Flax_daily_build/Binaries/Editor/Win64/$(FlaxConfiguration)/FlaxEditor.exe",
+      "commandLineArgs": "-project \"C:/Users/12847/Documents/BaiduSyncdisk/SplineTrails\"",
+      "nativeDebugging": false
+    }
+  }
+}

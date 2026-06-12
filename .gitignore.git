@@ -1,0 +1,9 @@
+/.vscode/*
+/Cache/*
+/Logs/*
+/Binaries/*
+/ScreenShots/*
+omnisharp.json
+SplineTrails.code-workspace
+SplineTrails.sln
+SplineTrails.sln.DotSettings.user
