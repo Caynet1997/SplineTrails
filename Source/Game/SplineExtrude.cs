@@ -1,5 +1,6 @@
 ﻿
 using System;
+using System.Collections.Generic;
 using FlaxEngine;
 
 namespace Game.Game;
@@ -9,65 +10,62 @@ public class SplineExtrude : Script
 {
     [ReadOnly]
     public int VerticlesCount;
-    private Action SettingsUpdate;
-    public SplineSampler SplineSampler
-    {
+    
+    public SplineSampler SplineSampler{
         set
         {
-            ref SplineSampler reference = ref _splineSampler;
-
-            if (reference == null)
+            if (_splineSampler != null)
             {
-                reference?.SamplerUpdated -= OnSplineUpdated;
-            }
-            else if(reference != value)
-            {
-                reference?.SamplerUpdated += OnSplineUpdated;
+                if (value == null)
+                {
+                    _splineSampler.SamplerUpdated -= OnSplineUpdated;
+                }
+                else
+                if(_splineSampler != value)
+                {
+                    value.SamplerUpdated += OnSplineUpdated;
+                }
             }
             _splineSampler = value;
         }
         get => _splineSampler;
     }
 
-    private SplineSampler _splineSampler;
-    public Actor ModelHolder;
-    public Material material;
-
     [Tooltip("横截面配置（矩形、圆形等）")]
-    public PolygonProfile Profile
-    {
+    public ExtrudeSetting Profile{
         set
         {
-            ref PolygonProfile profile = ref _profile;
             _profile = value;
-            SettingsUpdate?.Invoke();
+            _settingsUpdate?.Invoke();
         }
         get => _profile;
     }
-    private PolygonProfile _profile = new()
+    
+    private ExtrudeSetting _profile = new()
     {
-        Segments = 4,
-        Radius = 8f,
+        PolygonSegments = 4,
+        PolygonRadius = 8f,
     };
-
+    private SplineSampler _splineSampler;
     private Float3[] _verticesBuffer;
     private Float3[] _normalsBuffer;
     private Float2[] _uvsBuffer;
     private uint[] _indicesBuffer;
     private StaticModel _staticModel;
-    private MeshAccessor accessor;
+    private MeshAccessor _accessor;
+    private Action _settingsUpdate;
 
     public override void OnEnable()
     {
         _splineSampler?.SamplerUpdated += OnSplineUpdated;
-        SettingsUpdate += OnSplineUpdated;
+        _settingsUpdate += OnSplineUpdated;
         OnSplineUpdated();
     }
 
     public override void OnDisable()
     {
         _splineSampler?.SamplerUpdated -= OnSplineUpdated;
-        SettingsUpdate -= OnSplineUpdated;
+        _settingsUpdate -= OnSplineUpdated;
         if (_staticModel != null)
         {
             Destroy(ref _staticModel);
@@ -79,25 +77,28 @@ public class SplineExtrude : Script
         if (SplineSampler == null) return;
 
         SplineSampler.SplineSample[] samples = SplineSampler.CachedSamples;
-        if (samples == null || samples.Length < 2 || !ModelHolder) return;
+        if (samples == null || samples.Length < 2 || !Profile.ModelParent) return;
 
         // 初始化 StaticModel
+        _accessor ??= new();
         if (!_staticModel)
         {
-            _staticModel = ModelHolder.GetOrAddChild<StaticModel>();
+            _staticModel = Profile.ModelParent.GetOrAddChild<StaticModel>();
             _staticModel.Model = Content.CreateVirtualAsset<Model>();
             _staticModel.Model.SetupLODs([1]);
             _staticModel.HideFlags = HideFlags.FullyHidden;
         }
 
-        Vector2[] profileVertices = Profile.GenerateCrossSection();
+        (Vector2[],float[]) pointAndU = Profile.GetProfilePointsAndUVu();
+        Vector2[] profileVertices = pointAndU.Item1;
+        float[] uVu = pointAndU.Item2;
         int profileCount = profileVertices.Length;
         int sampleCount = samples.Length;
         float totalLength = SplineSampler.TotalLength;
 
         // 确定阵列数量
-        int arrayCount = Profile.ArrayGenerate ? Math.Max(1, Profile.ArrayGenerateCount) : 1;
-        Vector2 arrayOffset = Profile.ArrayGenerateOffset;
+        int arrayCount = Profile.UseArrayGenerate ? Math.Max(1, Profile.ArrayGenerateCount) : 1;
+        Vector2 arrayOffset = Profile.ArrayGenerateInterval;
 
         bool IsGenerateCap = Profile.CapEnds && !SplineSampler.Spline.IsLoop;
 
@@ -122,12 +123,13 @@ public class SplineExtrude : Script
         int iIndex = 0;
 
         // 外层阵列循环
+        Vector2 uvScale = Profile.UVScaleIncreasement + 1;
         for (int a = 0; a < arrayCount; a++)
         {
             // 计算当前阵列实例的2D偏移
             Vector2 currentOffset = arrayOffset * ((arrayCount - 1)*0.5f - a)*2f;
 
-            // 计算单圈的所有顶点（包含硬边分裂 + 阵列偏移）
+            // 计算采样点处轮廓的实际顶点法线和UV
             int CalculateRingVertices(SplineSampler.SplineSample sample, float vCoord, int startVIndex)
             {
                 int actualVertexCount = 0;
@@ -152,30 +154,24 @@ public class SplineExtrude : Script
                     Vector3 faceNormal2 = Vector3.Cross(sample.Direction, dir2).Normalized;
 
                     float angle = MathF.Acos(float.Clamp(Vector3.Dot(dir1, dir2), -1f, 1f)) * (180f / MathF.PI);
-                    float u = (float)j / profileCount;
 
-                    if (angle >= Profile.HardEdgeAngleThreshold)
-                    {
-                        _verticesBuffer[startVIndex + actualVertexCount] = posCurr;
-                        _normalsBuffer[startVIndex + actualVertexCount] = faceNormal1;
-                        _uvsBuffer[startVIndex + actualVertexCount] = new Vector2(u * (1 + Profile.UVScale.X), vCoord * (1 + Profile.UVScale.Y));
-                        actualVertexCount++;
-
-                        _verticesBuffer[startVIndex + actualVertexCount] = posCurr;
-                        _normalsBuffer[startVIndex + actualVertexCount] = faceNormal2;
-                        _uvsBuffer[startVIndex + actualVertexCount] = new Vector2(u * (1 + Profile.UVScale.X), vCoord * (1 + Profile.UVScale.Y));
-                        actualVertexCount++;
-                    }
-                    else
+                    float u = uVu[j];
+                    if (angle < Profile.HardEdgeAngleThreshold)
                     {
                         // 平滑法线应该基于偏移后的位置计算
                         Vector3 smoothNormal = (posCurr - (sample.Position + (currentOffset.X * sample.Tangent) + (currentOffset.Y * sample.Normal))).Normalized;
-                        
-                        _verticesBuffer[startVIndex + actualVertexCount] = posCurr;
-                        _normalsBuffer[startVIndex + actualVertexCount] = smoothNormal;
-                        _uvsBuffer[startVIndex + actualVertexCount] = new Vector2(u * (1 + Profile.UVScale.X), vCoord * (1 + Profile.UVScale.Y));
-                        actualVertexCount++;
+                        faceNormal1 = smoothNormal;
+                        faceNormal2 = smoothNormal;
                     }
+                    _verticesBuffer[startVIndex + actualVertexCount] = posCurr;
+                    _normalsBuffer[startVIndex + actualVertexCount] = faceNormal1;
+                    _uvsBuffer[startVIndex + actualVertexCount] = new Vector2(0, vCoord) * uvScale;
+                    actualVertexCount++;
+
+                    _verticesBuffer[startVIndex + actualVertexCount] = posCurr;
+                    _normalsBuffer[startVIndex + actualVertexCount] = faceNormal2;
+                    _uvsBuffer[startVIndex + actualVertexCount] = new Vector2(u, vCoord) * uvScale;
+                    actualVertexCount++;
                 }
                 return actualVertexCount;
             }
@@ -323,8 +319,6 @@ public class SplineExtrude : Script
     /// </summary>
     private void UpdateMeshByAccessor(int vertexCount, int indexCount)
     {
-        accessor ??= new();
-
         // 定义顶点布局：包含位置、法线和切线（切线对光照很重要）
         var vertexLayout = new VertexElement[]
         {
@@ -334,76 +328,159 @@ public class SplineExtrude : Script
         };
 
         // 分配索引缓冲区和顶点缓冲区
-        accessor.AllocateBuffer(MeshBufferType.Index, indexCount, PixelFormat.R32_UInt);
-        accessor.AllocateBuffer(MeshBufferType.Vertex0, vertexCount, GPUVertexLayout.Get(vertexLayout));
+        _accessor.AllocateBuffer(MeshBufferType.Index, indexCount, PixelFormat.R32_UInt);
+        _accessor.AllocateBuffer(MeshBufferType.Vertex0, vertexCount, GPUVertexLayout.Get(vertexLayout));
 
         // 填入数据
-        accessor.Positions = _verticesBuffer;
-        accessor.Triangles = _indicesBuffer;
-        accessor.TexCoords = _uvsBuffer;
+        _accessor.Positions = _verticesBuffer;
+        _accessor.Triangles = _indicesBuffer;
+        _accessor.TexCoords = _uvsBuffer;
 
         // 自动计算法线切线
-        accessor.ComputeNormals();
+        _accessor.ComputeNormals();
 
         // 将更改提交到 GPU 的指定网格中
-        if (accessor.UpdateMesh(_staticModel.Model.LODs[0].Meshes[0], false))
+        if (_accessor.UpdateMesh(_staticModel.Model.LODs[0].Meshes[0], false))
         {
             Debug.Log("UpdateMesh Failed!");
             return;
         }
         BoundingBox box = SplineSampler.Spline.Box;
         _staticModel.Model.LODs[0].Meshes[0].SetBounds(ref box);
-        _staticModel.SetMaterial(0,material);
+        _staticModel.SetMaterial(0,Profile.ModelMaterial);
     }
 }
 
-public struct PolygonProfile
+public struct ExtrudeSetting
 {
-    [Tooltip("多边形的半径"),Range(0.1f,1000f)]
-    public float Radius;
+    [Tooltip("模型的父Actor")]
+    public Actor ModelParent;
 
-    [Tooltip("多边形的分段数（段数越多越圆滑）"),Range(3,64)]
-    public int Segments;
+    [Tooltip("模型的材质")]
+    public Material ModelMaterial;
+
+    public bool UseCostomProfile;
+
+    [Tooltip("多边形的半径"),Range(1f,256f),VisibleIf("UseCostomProfile",true)]
+    public float PolygonRadius;
+
+    [Tooltip("多边形的分段数（段数越多越圆滑）"),Range(2,256),VisibleIf("UseCostomProfile",true)]
+    public int PolygonSegments;
+
+    [Tooltip("自定义轮廓"),VisibleIf("UseCostomProfile")]
+    public List<Vector2> CostomProfilePoints;
 
     [Tooltip("旋转角度"),Range(0f,360f)]
-    public float Angle;
+    public float Degree;
 
-    [Tooltip("缩放")]
-    public Vector2 Scale;
+    [Tooltip("缩放增量")]
+    public Vector2 ScaleIncreasement;
 
     [Tooltip("位置偏移")]
     public Vector2 Offset;
 
-    [Tooltip("UV缩放"),Range(0.1f,32f)]
-    public Vector2 UVScale;
+    [Tooltip("UV缩放增量")]
+    public Vector2 UVScaleIncreasement;
 
-    [Tooltip("按角度平滑法线"),Range(0f,180f)]
+    [Tooltip("按角度平滑法线"), Range(0f,180f)]
     public float HardEdgeAngleThreshold; 
 
     [Tooltip("是否生成封顶面")]
     public bool CapEnds;
 
-    [Tooltip("是否翻转法线（用于摄像机在管道内部观察）")]
+    [Tooltip("是否翻转法线")]
     public bool InvertNormals;
 
-    [Tooltip("阵列生成")]
-    public bool ArrayGenerate;
+    [Tooltip("是否启用阵列生成")]
+    public bool UseArrayGenerate;
 
-    [Tooltip("阵列生成数量"),VisibleIf("ArrayGenerate")]
+    [Tooltip("阵列生成数量"), Range(1,64), VisibleIf(nameof(UseArrayGenerate))]
     public int ArrayGenerateCount;
 
-    [Tooltip("阵列生成偏移"),VisibleIf("ArrayGenerate")]
-    public Vector2 ArrayGenerateOffset;
+    [Tooltip("阵列生成间距"), VisibleIf(nameof(UseArrayGenerate))]
+    public Vector2 ArrayGenerateInterval;
 
-    public readonly Vector2[] GenerateCrossSection()
+    public readonly (Vector2[],float[])GetProfilePointsAndUVu()
     {
-        var vertices = new Vector2[Segments];
-        float angleStep = Mathf.TwoPi / Segments;
-        for (int i = 0; i < Segments; i++)
+        Vector2[] profile;
+        float[] u;
+        int count = 0;
+        if (UseCostomProfile)
         {
-            float angle = -(i + 0.5f) * angleStep * (InvertNormals? -1: 1);
-            vertices[i] = new Vector2(Mathf.Cos(angle+float.DegreesToRadians(Angle)) * (1 + Scale.X), Mathf.Sin(angle+float.DegreesToRadians(Angle)) * (1 + Scale.Y)) * Radius + Offset;
+            if (CostomProfilePoints != null && CostomProfilePoints.Count > 0)
+            {
+                count = CostomProfilePoints.Count;
+                profile = new Vector2[count];
+
+                float rad = Mathf.DegreesToRadians * Degree;
+                float cosA = Mathf.Cos(rad);
+                float sinA = Mathf.Sin(rad);
+
+                // 预计算缩放因子（与内置模式语义一致：1+Scale）
+                float sx = 1f + ScaleIncreasement.X;
+                float sy = 1f + ScaleIncreasement.Y;
+
+                for (int i = 0; i < count; i++)
+                {
+                    Vector2 p = CostomProfilePoints[i];
+
+                    // 1. 缩放（相对于原点）
+                    p.X *= sx;
+                    p.Y *= sy;
+
+                    // 2. 旋转（绕原点）
+                    float rx = p.X * cosA - p.Y * sinA;
+                    float ry = p.X * sinA + p.Y * cosA;
+                    p.X = rx;
+                    p.Y = ry;
+
+                    // 3. 平移
+                    p += Offset;
+
+                    profile[InvertNormals?(count - 1 - i):i] = p;
+                }
+            }
+            else
+            {
+                profile = [];
+            }
         }
-        return vertices;
+        else
+        {
+            count = PolygonSegments<2?2:PolygonSegments;
+            profile = new Vector2[count];
+            float angleStep = Mathf.TwoPi / count;
+            float rad = Mathf.DegreesToRadians * Degree;
+            float sx = 1f + ScaleIncreasement.X;
+            float sy = 1f + ScaleIncreasement.Y;
+
+            for (int i = 0; i < count; i++)
+            {
+                float a = -(i + 0.5f) * angleStep * (InvertNormals ? -1f : 1f) + rad;
+                profile[i] = new Vector2(
+                    Mathf.Cos(a) * sx,
+                    Mathf.Sin(a) * sy
+                ) * PolygonRadius + Offset;
+            }
+        }
+
+        u = new float[count];
+        if (count > 0)
+        {
+            float cumLen = 0f;
+            for (int j = 0; j < count; j++)
+            {
+                int nextJ = (j + 1) % count;
+                float length =  Vector2.Distance(profile[j], profile[nextJ]);
+                cumLen += length;
+                u[j] = length;
+            }
+            float factor = cumLen>0f?1f/cumLen:1f;
+            for (int j = 0; j < count; j++)
+            {
+                u[j] *= factor;
+            }
+        }
+        return (profile,u);
     }
 }

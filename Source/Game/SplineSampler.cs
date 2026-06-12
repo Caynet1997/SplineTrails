@@ -29,7 +29,7 @@ public class SplineSampler : Script
         get => _angleThreshold;
     }
 
-    [Tooltip("基础采样步长"), Range(0.001f, 1f)]
+    [Tooltip("基础采样步长"), Range(0.001f, 0.5f)]
     public float BaseStepSize
     {
         set
@@ -37,7 +37,7 @@ public class SplineSampler : Script
             if (_baseStepSize != value)
             {
                 _baseStepSize = value;
-                OnSplineUpdated();
+                SettingsUpdate?.Invoke();
             }
         }
         get => _baseStepSize;
@@ -118,6 +118,7 @@ public class SplineSampler : Script
         rotated -= newTangent * Vector3.Dot(rotated, newTangent);
         return rotated.Normalized;
     }
+
     private void OnSplineUpdated()
     {
         if (!Spline || Spline.SplinePointsCount <2) return;

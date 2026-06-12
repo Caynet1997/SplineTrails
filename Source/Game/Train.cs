@@ -42,7 +42,7 @@ public class Train : Script
     {
         if (GetTotaleDistance(Sampler, out float length))
         {
-            if (Mathf.Abs(length) < 1f)
+            if (Mathf.Abs(length) < 0.001f)
                 return;
             float force = (IsForward?ThrustForce:0f) - (IsBackward?BrakeForce:0f);
             float dragForce = -DragFroceCoincidence * Speed;
@@ -63,7 +63,7 @@ public class Train : Script
                 force += dragForce;
                 Speed += force / Mass * dt;
             }
-            CurrentDistance = Sampler.Spline.IsLoop? float.Clamp(next % length,0.0001f,length): next;
+            CurrentDistance = Sampler.Spline.IsLoop? next : float.Clamp(next % length,0.0001f,length);
             Transform trans0 = SplineSampler.GetSplineTransformAtDistance(Sampler, CurrentDistance + TrainLength * 0.5f, Actor.Scale);
             Transform trans1 = SplineSampler.GetSplineTransformAtDistance(Sampler, CurrentDistance - TrainLength * 0.5f, Actor.Scale);
             Transform finalTrans = new()
