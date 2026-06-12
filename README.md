@@ -1,4 +1,4 @@
-<h1>A spline tool script Project in Flax Engine</h1>
+<h1>Spline tool script project in Flax Engine</h1>
 
 <img align="center" src="Preview.png" width="768px"/>
 
